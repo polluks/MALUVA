@@ -2,7 +2,7 @@
 ; LGPL License applies, see LICENSE file
 ; TO BE COMPILED WITH SJASMPLUS
 ; Thanks to Boriel for his 8 bits division code in ZX-Basic, DivByTen function is based on his code
-; Thanks to Ped7g, Alcoholics Anonymous and  SevenFFF for their help in the Spectrum Next forum
+; Thanks to Ped7g, Alcoholics Anonymous and SevenFFF for their help in the Spectrum Next forum
 
 			ORG $843C
             OUTPUT  MLV_NEXT.BIN
@@ -37,6 +37,7 @@
 			define REG_PALETTE_VALUE	$41
 			define REG_PALETTE_CRTL		$43
 			define REG_MMU7			 	$57
+			define REG_CPUSPEED			$07
 
 
 			define INTERPRETER_ADDRESS $6000  	; Address where the interpreter is loaded
@@ -56,6 +57,7 @@
 			define DAAD_PATCH_ES $707A		    ; Address where the interpreter sets the internal flag which makes the words be cutted when printed
 			define DAAD_PATCH_EN $701A			
 
+			define MALUVA_REPORT_FLAG	20
 
 ; ********************************************************************                        
 ;                                 MAIN
@@ -65,6 +67,8 @@ Start
 					DI
 					PUSH 	BC
 					PUSH 	IX
+					RES		7,(IX+MALUVA_REPORT_FLAG)	; Clear bit 7 of flag 28 (mark of EXTERN executed)
+
 
 ; ------ Detect if english or spanish interpreter
 					PUSH 	AF
@@ -93,10 +97,18 @@ Init				LD 	D, A		; Preserve first parameter
 					JP 	Z, XMessage
 					CP  4
 					JP  Z, XPart
-					JP 	cleanExit
+					CP  7
+					JP  Z, XUndone
+					CP 	8
+					JP 	Z, XNextCLS
+					CP  9
+					JP 	Z, XNextReset
+					CP  10
+					JP 	Z, XNextSpeed
+
+					JP 	ExitWithError
 ; ---- Set the filename
-LoadImg
-					LD 	A, D		; Restore first parameter
+LoadImg				LD 	A, D		; Restore first parameter
 					CALL 	DivByTen
 					ADD 	'0'
 					LD 	HL, Filename+2
@@ -114,7 +126,7 @@ LoadImg
 
 ; --- Set default disk  
 					CALL 	setDefaultDisk
-                    JP      C, cleanExit
+                    JP      C, ExitWithError
 
 
 ; --- open file
@@ -126,7 +138,7 @@ LoadImg
 					XOR 	A
 					LD 		BC, LAYER2_ACCESS_PORT
 					OUT 	(C),A					 ; Disable layer 2
-					JP 		cleanExit
+					JP 		ExitWithError
 
 
 
@@ -139,8 +151,8 @@ fileOpened          LD	    (FileHandle),A
 					RST     $08
 					DB      F_READ     
 
-; ---- activate Layer2 (in case it wasn't already active)
-					LD 		A, 2
+; ---- deactivate Layer2 to make cleaning invisible
+					XOR 	A
 					LD 		BC, LAYER2_ACCESS_PORT
 					OUT 	(C),A
 
@@ -159,6 +171,17 @@ fileOpened          LD	    (FileHandle),A
 					DEC 	A							; If we have N lines, then last line is N-1
         			NEXTREG REG_CLIP_LAYER2, 0	    	; clip.layer2.y1 = (IMGNumLine)
         			NEXTREG REG_CLIP_LAYER2, A      	; clip.layer2.y2 = (IMGNumLine)
+
+; ---- clear the layer
+
+					CALL ClearLayer2
+
+; ---- activate Layer2
+					LD 		A, 2
+					LD 		BC, LAYER2_ACCESS_PORT
+					OUT 	(C),A
+
+
 ; ---- read and set palette
 					
 					NEXTREG REG_PALETTE_CRTL, %00010000			; auto-increment ON, active palette = first layer2 pal
@@ -224,17 +247,75 @@ drawEnd				NEXTREG REG_MMU7, 1				; Change MMU7 bank to to original one
 					LD 		A,  (FileHandle)
 					RST     $08
                     DB      F_CLOSE
-
 	
 cleanExit			EI
 					POP 	IX
 					POP 	BC
 					RET
 
+; It happens the DAAD code sets the "done" status after the execution of an EXTERN, something which happens in a function called NXTOP, which does a few thing and then jumps to 
+; another function named CHECK. Due to that , it is not possible to exit an EXTERN without getting the done status set. To avoid that we are going to go through the DAAD interpreter
+; code to make what NXTOP does, and then jump to the JP CHECK at the end of that NXTOP function.
+
+cleanExitNotdone		POP 	IX			; Copied from Cleanexit, without the EI
+						POP 	BC
+						
+						POP 	HL			;This is the return address for Extern, there we should fin the "JP NXTOP" 
+						INC 	HL			;Now we are pointing to address where NXTOP is stored
+						LD 		E, (HL)
+						INC 	HL
+						LD 		D, (HL)		; Now DE contains NXTOP
+						INC 	DE
+						INC 	DE
+						INC 	DE
+						INC 	DE
+						INC 	DE
+						INC 	DE							; Inc six times to skip all code in NXTOP up to the JP CHECK
+						LD  	(PatchNXTOPJMP + 1), DE		; Now the code below is just like NXTOP function, but without the done status set, and plus EI
+
+FakeNXTOP				INC		BC			; This is the fake NXTOP code, with the JP at the end that jumps to the real JP CHECK
+						POP 	HL
+						EI					; EI is not in NXTOP but it was in Cleanexit
+PatchNXTOPJMP			JP		0			; This will be patched above
+
+
+ExitWithError			POP		IX											; Extract and push again real IX value from stack
+						PUSH 	IX		
+						SET 	7, (IX + MALUVA_REPORT_FLAG)				; Mark error has happened
+						LD 		A, (IX + MALUVA_REPORT_FLAG)				
+						AND 	1											; If bit 0 of flag 28 was set, then also exit extern without marking as DONE
+						JR 		NZ, cleanExitNotdone
+						JR 		cleanExit
+
+DisableLayer2			NEXTREG REG_CLIP_WINDOW_CTRL, 1   	; reset Layer2 clip window index (to X1)
+        				NEXTREG REG_CLIP_LAYER2, 0  	    ; clip.layer2.x1 = 0
+        				NEXTREG REG_CLIP_LAYER2, 0    	; clip.layer2.x2 = 255
+        				NEXTREG REG_CLIP_LAYER2, 0	    	; clip.layer2.y1 = (IMGNumLine)
+        				NEXTREG REG_CLIP_LAYER2, 0      	; clip.layer2.y2 = (IMGNumLine)
+						RET						
+
+XNextCLS				CALL DisableLayer2
+						CALL ClearLayer2
+						JP cleanExit
+
+XNextReset				CALL DisableLayer2
+						CALL ClearLayer2
+						NEXTREG REG_CPUSPEED, $0		; On exit set 3.5Mhz back
+						RST 0				
+
+XNextSpeed				LD 	A, D
+						CP  4
+						JP 	NC, cleanExit				; Value > 3, invalid CPU speed
+						NEXTREG REG_CPUSPEED, A
+						JP cleanExit
+
+
+
 
 ; Both read savegame and load savegame use the same code, that is just slightly modified before jumping in the common part at DoReadOrWrite
 
 LoadGame			LD  A, FA_READ
+		
 					LD	(OpenMode+1),A
 					LD  A, F_READ
 					LD 	(ReadWrite),A
@@ -278,16 +359,22 @@ CloseFile			LD 	A, $FF			; That $FF will be modifed by code above
                     DB      F_CLOSE
 
 
-					JR 	cleanExit	
+					JP 	cleanExit	
 
 diskFailure			LD 	L, 57			; E/S error
 DAADSysmesCall		CALL    DAAD_SYSMESS_ES
-					JR 	cleanExit
+					JP 	ExitWithError
 
 XPart				LD 		A, D
 					ADD		'0'
 					LD      (XMESSFilename), A
-					JR 		cleanExit
+					JP 		cleanExit
+
+XUndone				POP IX				; Make sure IX is correct
+					PUSH IX
+					RES		4, (IX-1)						
+					JP 		cleanExitNotdone
+
 
 
 XMessage			LD 		L, D ;  LSB at L
@@ -306,7 +393,7 @@ XMessage			LD 		L, D ;  LSB at L
 					LD   	IX, XMESSFilename
 					RST     $08
                     DB      F_OPEN      
-                    JR      C, cleanExit
+                    JP      C, ExitWithError
 					LD 		(CloseFile+1),A ; Preserve file handle to be able to close it later
 					LD 		(XmessReadFile+1),A ; Preserve file handle to be able to read from it
 ; Seek file					
@@ -406,6 +493,26 @@ FillUlaLayer		    XOR 	A
 						LDIR					; Copy that zero BC -1 times
 						RET
 						
+; Clear the layer 2
+
+ClearLayer2				LD 		B, 6
+						LD 		E, 24
+ClearLoop				LD 		A, E
+						NEXTREG REG_MMU7, A				; Change MMU7 bank
+						INC 	E
+						PUSH 	DE
+						PUSH 	BC
+						LD 		HL, $E000
+						XOR 	A	
+						LD 		(HL),A
+						LD 		BC, $2000 - 1
+						LD 		DE, $E001
+						LDIR
+						POP 	BC
+						POP 	DE
+						DJNZ 	ClearLoop
+						NEXTREG REG_MMU7, 1				; REstore original MMU bank
+						RET
 												
 
 

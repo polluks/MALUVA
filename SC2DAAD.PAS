@@ -5,7 +5,7 @@ PROGRAM SC2DRG;
 USES sysutils;
 
 CONST TWO_KILOBYTES = 2048;
-	  VERSION = '0.4';
+	  VERSION = '0.8';
 
 
 TYPE cpcHeaderType =  ARRAY[0..127] of Byte;
@@ -19,7 +19,7 @@ BEGIN
 	Writeln();
 	WriteLn('SYNTAX: ',BinaryName,' <target> <inputFilename> <outputFilename> <lines> [transparency]');
 	Writeln();
-	Writeln('Target may be c64, cpc, msx, zx or next.');
+	Writeln('Target may be c64, cp4, cpc, msx, zx or next. CP4 stands for Commodore Plus/4 although it''s obly used for multicolor images, for HiRes it uses the C64 images');
 	Writeln();
 	Writeln('Transparency could only be used in ZX Spectrum Next, value it''s a 0-255 value representing a color in RRRGGGBB format, or ''auto''. If value is 0 there will be no transparency so pure black cannot be used as transparent color. ');
 	Writeln();
@@ -77,11 +77,21 @@ BEGIN
 	END;
     IF uppercase(target)='C64'	THEN
     BEGIN
-		WriteLn('For C64 you will require an Art Studio .ART file (9002 bytes), a dump of C64 High Resolution mode.');
+		WriteLn('For C64 you will require an Art Studio .ART file if you will be using the DAADs standard mode (HiRes) or a .KOA/.KLA file if you will use split screen and Multicolor Images. SC2DAAD will determine the file format by the file extension.');
 		Writeln();
 		WriteLn('You should specify the number of lines from top you want to include in the image. Number of lines should be a multiple of 8.');
 		Writeln();
 		WriteLn('The output file should have .64 extension, and have three digits for the number, i.e.: 001.64, 012.64, 118.64');
+		Writeln();
+		Halt(0);
+	END;
+    IF uppercase(target)='CP4'	THEN
+    BEGIN
+		WriteLn('For Commodore Plus/4 you will require a Botticceli HiRes PRG file. There is no support for Multicolor images.');
+		Writeln();
+		WriteLn('You should specify the number of lines from top you want to include in the image. Number of lines should be a multiple of 8.');
+		Writeln();
+		WriteLn('The output file should have .4 extension, and have three digits for the number, i.e.: 001.4, 012.4, 118.4');
 		Writeln();
 		Halt(0);
 	END;
@@ -186,7 +196,7 @@ BEGIN
 	CloseFile(outFile);
 END;	
 
-PROCEDURE CPC(inputFilename, outputFilename: string; lines:word;NumPaletteEntries:byte);
+PROCEDURE CPC(inputFilename, outputFilename: string; lines:word);
 VAR i, bytesToRead, current2KBuffercount: word;
 	palFileName:String;
 	inFile, outFile: FILE;
@@ -197,14 +207,16 @@ VAR i, bytesToRead, current2KBuffercount: word;
 	CheckSum: Word;
 	ScansPer2kBuffer: Byte;
 	FileSize : Word;
+	Readed: Longint;
+	Offset: Word;
 	(* 
 	 CPC FILE FORMAT IS (after the AMSDOS header):
 	 00    : scans per 2k buffer, 
-	 01-04 : palette used, first one is for background, second one for text ink
-	 05-06  :number of lines multiplied by 10, that is, number of bytes per scanline
-	 07-   : data as in a SCR file, but with less lines - or not.
+	 01-16 : palette used, first one is for background, second one for text ink
+	 17-18  :number of lines multiplied by 10, that is, number of bytes per scanline
+	 19-   : data as in a SCR file, but with less lines - or not.
 
-	 Exception: 200 lines graphic contains 16384 bytes, 16384 for data, and 4 for palette, but the palette is over the last 4 bytes of data, where
+	 Exception: 200 lines graphic contains 16384 bytes, 16384 for data, and 16 for palette, but the palette is over the last 16 bytes of data, where
 	 the spare 48 bytes are. 16384 in CPC header and use CAS_IN_DIRECT to load directly to VRAM, then set the palette (better set all palette to black first
 	 to avoid strange colours on screen)
 	 *)
@@ -214,16 +226,15 @@ BEGIN
 	AssignFile(inFile, palFileName);  
 	TRY
 		Reset(inFile, 1);
-		Seek(inFile, 3+128);
-		Blockread(inFile, Palette[0], 1);
-		Seek(inFile, 15+128);
-		Blockread(inFile, Palette[1], 1);
-		Seek(inFile, 27+128);
-		Blockread(inFile, Palette[2], 1);
-		Seek(inFile, 39+128);
-		Blockread(inFile, Palette[3], 1);
+		Offset := 128 + 3; // First palette entry it's at byte 3 after the 128 byte AMSDOS header
+		for i:=0  TO 15 DO
+		BEGIN
+		 Seek(inFile, Offset);
+		 Blockread(inFile, Palette[i], 1);
+		 Offset := Offset  + 12;  // one palette value very 12 bytes
+		END;
 	EXCEPT
-		on E: Exception DO Error('PAL file not found or not valid, the .PAL file for the image should be located at same folder than SCR file.' + E.Message);
+		on E: Exception DO Error('PAL file not found or not valid, the .pal file for the image should be located at same folder than SCR file. If your OS is case sensitive, make sure the PAL file has the extension in lowercase.' + E.Message);
 	END; 
 	CloseFile(inFile);
 
@@ -259,30 +270,26 @@ BEGIN
 	//Save header
 	BlockWrite(outFile, cpcHeader, 128);		
 
-	FOR i:= 0 to NumPaletteEntries-1 do Palette[i]:=GetCPCFirmwarePalette(Palette[i]);
-
-
+	FOR i:= 0 to 15 do Palette[i]:=GetCPCFirmwarePalette(Palette[i]);
 
 	IF lines=200 THEN //Full screen image, just save all 16.000 bytes plus palette
 	BEGIN
 		FOR I:=1 to 8 DO CopyBlock(inFile, outFile, 2048);
-		Seek(outFile, 16384 - NumPaletteEntries + 128);
-		BlockWrite(outFile, Palette, NumPaletteEntries);
+		Seek(outFile, 16384 - 16 + 128);
+		BlockWrite(outFile, Palette, 16);
 	END
 	ELSE
 	BEGIN             // Partial file, more tricky
 		BytesToRead := lines * 10;
-
 		ScansPer2kBuffer := TWO_KILOBYTES DIV BytesToRead;
 		// Save number of lines and palette
 		BlockWrite(outFile, ScansPer2kBuffer, 1);
-		BlockWrite(outFile, Palette, 4);
+		BlockWrite(outFile, Palette, 16);
 		BlockWrite(outFile, BytesToRead, 2);		
-
-		current2KBuffercount := 7;
+		current2KBuffercount := 19;
 	    FOR i:= 1 TO 8 DO
 		BEGIN
-		 	Blockread(inFile, TempBuffer, TWO_KILOBYTES);
+		 	Blockread(inFile, TempBuffer, TWO_KILOBYTES, Readed);
 		 	BlockWrite(outFile, TempBuffer, BytesToRead);
 		 	current2KBuffercount := current2KBuffercount + bytesToRead;
 		 	IF (current2KBuffercount+bytesToRead > TWO_KILOBYTES) THEN
@@ -339,7 +346,7 @@ BEGIN
 	IF (PCXHeader[3]<>8) THEN Error('Invalid PCX file: not a 256 colors image');
 	width :=PCXHeader[8] + 256*PCXHeader[9] - PCXHeader[4] + 256*PCXHeader[5]+1;
  	height :=PCXHeader[10] + 256*PCXHeader[11] - PCXHeader[6] + 256*PCXHeader[7]+1;
-	IF (width<>256) or (height<>192) THEN Error('Invalid resolution or color depth. Input should be a 256x192, 256 colors PCX file.');
+	IF (width<>256) or (height<192) THEN Error('Invalid resolution. Input should be PCX file with 256 as width, and at least 192 as height.');
 	BlockWrite(outFile, transparency, 1); // transparency color
 	BlockWrite(outFile, lines, 1); // Number of lines
 	// Process the palette
@@ -532,12 +539,14 @@ BEGIN
     BlockWrite(outFile, PreviousValueCount, 1); // Mark of compression
 END;
 
-PROCEDURE C64(inputFilename, outputFilename: string; lines:byte);
+
+
+PROCEDURE C64ART(inputFilename, outputFilename: string; lines:byte);
 VAR inFile, outFile: FILE;
 		Aux : byte;
 		DataBuffer : pointer;
 	(* 
-	 C64 FILE FORMAT IS:
+	 C64 HiRes FILE FORMAT IS:
 	 00    : number of lines div 8
 	 01	   : byte which is used to show repeats in RLE encoding
 	 02-   : RLE encoded compressed bytes for the screen pixels
@@ -545,13 +554,14 @@ VAR inFile, outFile: FILE;
 	 nn+1-   : RLE encoded attributes
 	*)
 BEGIN
+	
 	AssignFile(inFile, inputFilename);
 	TRY
 	Reset(inFile, 1);
 	EXCEPT
-	 on E: Exception DO Error('Invalid C64 KOA file:' + E.message);
+	 on E: Exception DO Error('Invalid C64 ART file:' + E.message);
 	END; 
-	if (FileSize(inFile)<>9002) AND (FileSize(inFile)<>9009) THEN Error('Invalid file. File size must be 9002 or 9009 bytes (Art Studio HiRes .art file).');
+	if (FileSize(inFile)<>9002) AND (FileSize(inFile)<>9009) THEN Error('Invalid file. File size must be 9002 or 9009 bytes (Art Studio HiRes .ART file).');
 	AssignFile(outFile, outputFilename);
 	TRY
 	Rewrite(outFile, 1);
@@ -577,11 +587,147 @@ BEGIN
 	CloseFile(outFile);
 END;
 
+PROCEDURE C64KOA(inputFilename, outputFilename: string; lines:byte);
+VAR 	inFile, outFile: FILE;
+		Aux : byte;
+		DataBuffer : pointer;
+		ExtLines: Byte;
+	(* 
+	 C64 Multicolor FILE FORMAT IS:
+	 00    : always 0  - Marks the file is a Multicolor image
+	 01	   ; number of lines divided by 8
+	 02	   : byte which is used to show repeats in RLE encoding of BITMAP
+	 03-   : RLE encoded compressed bytes for the screen pixels
+	 nn-   : byte which is used to show repeats in COLOR for RLE encoding
+	 nn+1- : RLE encoded COLOR
+	 qq-   : bytes which is used to show repeats in SCREEN for 
+	 qq+1- : RLE encoded SCREEN
+	 xx    : Background color
+	*)
 
+	(* Important note: to avoid glitches in the split scanline, this converter will always generate a picture 8 pixels higher than asked. The last 8 scanlines are filled
+	   with 01010101, which makes every pixel have color 01. THen in the color area, that zone is filled with zero, which will make colors 01 and 10 be black. That way
+	   we will have a 8 pixels high black ribbon. Then the split are is placed in the middle of that area *)
+BEGIN
+	AssignFile(inFile, inputFilename);
+	TRY
+	Reset(inFile, 1);
+	EXCEPT
+	 on E: Exception DO Error('Invalid C64 KOA/KLA file:' + E.message);
+	END; 
+	if FileSize(inFile)<>10003 THEN Error('Invalid file. File size must be 10001 bytes long (Standard .KOA/.KLA).');
+	AssignFile(outFile, outputFilename);
+	TRY
+	Rewrite(outFile, 1);
+	EXCEPT
+	 on E: Exception DO Error('Can''t open file for output:' + E.message);
+	END; 
+
+	If Lines<>96 THEN Error('Multicolor images for C64 must be 96 pixels high, as the split area is fixed.');
+	
+	Aux := 0;
+	BlockWrite(outFile,Aux,1); // Mark of Multicolor file
+	ExtLines := Lines + 8;
+	Aux := Extlines div 8;
+	BlockWrite(outFile,Aux,1); // Number of lines divided by 8
+	
+	GetMem(DataBuffer, ExtLines * 40); 
+
+	Seek(inFile, 2); //Go bitmap area (2 byte C64 header)
+	FillChar(DataBuffer^, Extlines * 40, $55); // Fill 8 scanlines more with 01010101
+	BlockRead(inFile, DataBuffer^, lines* 40);
+	WriteRLECompresssion(outFile, DataBuffer, ExtLines * 40);
+
+	Seek(inFile, 8002); // Go to SCREEN area
+	FillChar(DataBuffer^,(ExtLines div 8)*40 , 0); // Make sure all colors are color 0
+  	BlockRead(inFile, DataBuffer^, (lines div 8) * 40);
+  	WriteRLECompresssion(outFile, DataBuffer, (Extlines div 8) * 40);
+
+	Seek(inFile, 9002); // Go to COLOR area
+	FillChar(DataBuffer^,(Extlines div 8)*40 , 0); // Make sure all colors are color 0 too
+  	BlockRead(inFile, DataBuffer^, (lines div 8)*40);
+  	WriteRLECompresssion(outFile, DataBuffer, (Extlines div 8)*40);
+    Seek(inFile, Filesize(InFile)-1); // Go to Background value
+	BlockRead(inFile, DataBuffer^,1);
+	BlockWrite(outFile, DataBuffer^,1);
+	CloseFile(inFile);
+	CloseFile(outFile);
+END;
+
+
+PROCEDURE CP4(inputFilename, outputFilename: string; lines:byte);
+VAR 	inFile, outFile: FILE;
+		Aux : byte;
+		DataBuffer : pointer;
+	(* 
+	 CP4  FILE FORMAT IS:
+	 00	   ; number of lines divided by 8
+	 01	   : byte which is used to show repeats in RLE encoding of BITMAP
+	 02-   : RLE encoded compressed bytes for the color pixels
+	 nn-   : byte which is used to show repeats in COLOR for RLE encoding
+	 nn+1- : RLE encoded COLOR 
+	 qq-   : bytes which is used to show repeats in SCREEN for  (luminance)
+	 qq+1- : RLE encoded SCREEN
+	 xx+1  : 1 byte Background color
+	*)
+BEGIN
+	AssignFile(inFile, inputFilename);
+	TRY
+	Reset(inFile, 1);
+	EXCEPT
+	 on E: Exception DO Error('Invalid PRG  file:' + E.message);
+	END; 
+	if FileSize(inFile)<>10050 THEN Error('Invalid file. File size must be 10050 bytes long (standard .PRG file generated by Botticelli).');
+	AssignFile(outFile, outputFilename);
+	TRY
+	Rewrite(outFile, 1);
+	EXCEPT
+	 on E: Exception DO Error('Can''t open file for output:' + E.message);
+	END; 
+
+	If Lines>200 THEN Error('Plus/4 images height can''tbe over 200 pixels.');
+	If Lines MOD 8 <> 0 THEN Error('Plus/4 images height should be a multiple of 8.');
+	
+	Aux := Lines div 8;
+	BlockWrite(outFile,Aux,1); // Number of lines divided by 8
+	
+	GetMem(DataBuffer, Lines * 40); 
+
+	Seek(inFile, $802); //Go bitmap area (Skip 2 byte CP4 header and two $400 areas for color and luminance)
+	BlockRead(inFile, DataBuffer^, Lines* 40);
+	WriteRLECompresssion(outFile, DataBuffer, Lines * 40);
+
+
+	Seek(inFile, $402); // Go to COLOR area
+  	BlockRead(inFile, DataBuffer^, (lines div 8)*40);
+  	WriteRLECompresssion(outFile, DataBuffer, (lines div 8)*40);
+
+
+	Seek(inFile, 2); // Go to LUMINANCE area
+  	BlockRead(inFile, DataBuffer^, (Lines div 8) * 40);
+  	WriteRLECompresssion(outFile, DataBuffer, (Lines div 8) * 40);
+
+
+    Seek(inFile, Filesize(InFile)-1); // Go to Background color value 
+	BlockRead(inFile, DataBuffer^,1);
+	BlockWrite(outFile, DataBuffer^,1);
+	CloseFile(inFile);
+	CloseFile(outFile);END;	
+
+
+PROCEDURE C64(inputFilename, outputFilename: string; lines:byte);
+VAR ext : AnsiString;
+BEGIN
+	ext := AnsiUpperCase(ExtractFileExt(inputFilename));
+    IF (ext = '.KOA') OR (ext='.KLA') THEN C64KOA(inputFilename, outputFilename, lines)
+	ELSE C64ART(inputFilename, outputFilename, lines);
+END;	
+
+
+(* MAIN *)
 VAR target, inputFilename, outputFilename: string;
 	lines : word;
 	transparency : byte;
-	NumPaletteEntries : Byte;
 	AuxString: string;
 	AuxVal : Longint;
 	Auto : Boolean;
@@ -597,18 +743,11 @@ BEGIN
 
 	// Check param Errors
 
-    IF (target<>'CPC') AND (target<>'NEXT') AND (target<>'ZX') AND (target<>'MSX') AND (target<>'C64') THEN Error('Invalid target.');
+    IF (target<>'CPC') AND (target<>'NEXT') AND (target<>'ZX') AND (target<>'MSX') AND (target<>'CP4')  AND (target<>'C64') THEN Error('Invalid target.');
 
     IF (uppercase(inputFilename) = 'HELP' ) THEN Help(target);	
 
-    NumPaletteEntries := 4;
-    AuxString := ParamStr(4);
-    IF (uppercase(AuxString)='MODE1') THEN
-    BEGIN
-    	AuxString := '200';
-    	NumPaletteEntries := 16;
-    END;
-
+	AuxString := ParamStr(4);
 	TRY
 		lines := StrToInt(AuxString);
     EXCEPT
@@ -618,6 +757,7 @@ BEGIN
     IF ((target='ZX') OR (target='MSX')) AND (lines >192) THEN Error('Maximum number of lines for MSX/ZX is 192');
     IF (target='CPC') AND (lines >96) AND (lines <>200) THEN Error('Maximum number of lines for CPC is 96, althought you can choose full screen with 200 lines');
     if (target='C64') AND (lines>200) THEN Error('Maximum number of lines for C64 is 200');
+	if (target='CP4') AND (lines>200) THEN Error('Maximum number of lines for C64 is 200');
 
     IF  ((lines MOD 8) <> 0) THEN Error('Number of lines must be a multiple of 8');
 
@@ -650,8 +790,9 @@ BEGIN
     // Let's do it
     IF target = 'ZX' THEN ZX(inputFilename, outputFilename, lines) 
     ELSE IF target = 'NEXT' THEN NEXT(inputFilename, outputFilename, lines, transparency, auto) 
-    ELSE IF target = 'CPC' THEN CPC(inputFilename, outputFilename, lines, NumPaletteEntries) 
+    ELSE IF target = 'CPC' THEN CPC(inputFilename, outputFilename, lines) 
     ELSE IF target = 'MSX' THEN MSX(inputFilename, outputFilename, lines)
+    ELSE IF target = 'CP4' THEN CP4(inputFilename, outputFilename, lines)
     ELSE IF target = 'C64' THEN C64(inputFilename, outputFilename, lines);
 
 END.

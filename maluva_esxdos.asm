@@ -40,7 +40,10 @@
 			define DAAD_PRINTMSG_ADDR_EN $6D90
 
 			define DAAD_PATCH_ES $707A		    ; Address where the interpreter sets the internal flag which makes the words be cutted when printed
-			define DAAD_PATCH_EN $701A			
+			define DAAD_PATCH_EN $701A	
+
+			define MALUVA_REPORT_FLAG	20
+		
 
 
 ; ********************************************************************                        
@@ -51,6 +54,7 @@ Start
 					DI
 					PUSH 	BC
 					PUSH 	IX
+					RES		7,(IX+MALUVA_REPORT_FLAG)	; Clear bit 7 of flag 28 (mark of EXTERN executed)
 
 ; ------ Detect if english or spanish interpreter
 					PUSH 	AF
@@ -77,7 +81,9 @@ Init				LD 	D, A		; Preserve first parameter
 					JP 	Z, XMessage
 					CP  4
 					JP  Z, XPart
-					JP 	cleanExit
+					CP  7
+					JP  Z, XUndone
+					JP 	ExitWithError
 ; ---- Set the filename
 LoadImg
 					LD 	A, D		; Restore first parameter
@@ -98,7 +104,7 @@ LoadImg
 
 ; --- Set default disk  
 					CALL 	setDefaultDisk
-                    JR      C, cleanExit
+                    JP      C, ExitWithError
 
 
 ; --- open file
@@ -106,7 +112,7 @@ LoadImg
 					LD   	IX, Filename
 					RST     $08
                     DB      F_OPEN      
-                    JR      C, cleanExit
+                    JP      C, ExitWithError
 
 
 ;  --- From this point we don't check read failure, we assume the graphic file is OK. Adding more fail control would increase the code size and chances of fail are low from now on
@@ -133,28 +139,29 @@ LoadImg
 
 			
 					SUB 	64
-					JR 	C, drawPartialThird  ; if thre is no carry, there is at least one whole third of screen
-					LD 	BC, 2048
-					LD 	H, B
-					LD 	L, C
+					JR 		C, drawPartialThird0  ; if thre is no carry, there is at least one whole third of screen
+					LD 		BC, 2048
+					LD 		H, B
+					LD 		L, C
 					SUB 	64
-					JR 	C, drawWholeThirds   ;if there is still no carry, there are at least two thirds of screen
+					JR 		C, drawWholeThirds   ;if there is still no carry, there are at least two thirds of screen
 					ADD 	HL, BC
 nextThird	        SUB 	64
-					JR 	C, drawWholeThirds ; if there is still no carry, it's a full screen (3 thirds)
-					ADD	HL, BC	           ; read one, two or the three whole thirds
-drawWholeThirds		LD 	B, H
-					LD 	C, L		
-					LD 	IX, VRAM_ADDR
+					JR 		C, drawWholeThirds ; if there is still no carry, it's a full screen (3 thirds)
+					ADD		HL, BC	           ; read one, two or the three whole thirds
+drawWholeThirds		LD 		B, H
+					LD 		C, L		
+					LD 		IX, VRAM_ADDR
 					PUSH    AF
-					LD 	A, D 		; file handle
+					LD 		A, D 		; file handle
 					PUSH 	DE
 					RST     $08
 					DB      F_READ
 					POP 	DE
 					POP 	AF
-					LD 	IX, VRAM_ADDR
+					LD 		IX, VRAM_ADDR
 					ADD 	IX, BC		; Hl points to next position in VRAM to paint at
+					JR 		drawPartialThird
                         
 ; --- This draws the last third, that is an uncomplete one, to do so, the file will come prepared so instead of an standar third with 8 character rows, it's a rare third with less rows.
 ;     For easier undesrtanding we will call 'row" each character row left, and 'line' each pixel line left, so each row is built by 8 lines.
@@ -162,6 +169,9 @@ drawWholeThirds		LD 	B, H
 ;     To determine how many rows are left we divide lines left by 8, but then to calculate how many bytes we have to read to load first pixel line for those rows we multiply by 32,
 ;     so in the end we multiply by 4. Once we know how much to read per each iteration we have to do 8 iterations, one per each line in a character. So we first prepare <lines left>*4 in
 ;     BC register,and then just read BC bytes 8 times, increasin IX (pointing to VRAM) by 256 each time to point to the next line inside the row
+
+drawPartialThird0		LD 		IX, VRAM_ADDR  ; If the image does not cover a whole third at all, IX is not initialized so it is initialized here
+
 
 
 drawPartialThird    ADD		A, 64		; restore the remaining number of lines (last SUB went negative)                
@@ -209,6 +219,40 @@ cleanExit			POP 	IX
 					POP 	BC
 					EI
 					RET
+
+; It happens the DAAD code sets the "done" status after the execution of an EXTERN, something which happens in a function called NXTOP, which does a few thing and then jumps to 
+; another function named CHECK. Due to that , it is not possible to exit an EXTERN without getting the done status set. To avoid that we are going to go through the DAAD interpreter
+; code to make what NXTOP does, and then jump to the JP CHECK at the end of that NXTOP function.
+
+cleanExitNotdone		POP 	IX			; Copied from Cleanexit, without the EI
+						POP 	BC
+						
+						POP 	HL			;This is the return address for Extern, there we should fin the "JP NXTOP" 
+						INC 	HL			;Now we are pointing to address where NXTOP is stored
+						LD 		E, (HL)
+						INC 	HL
+						LD 		D, (HL)		; Now DE contains NXTOP
+						INC 	DE
+						INC 	DE
+						INC 	DE
+						INC 	DE
+						INC 	DE
+						INC 	DE							; Inc six times to skip all code in NXTOP up to the JP CHECK
+						LD  	(PatchNXTOPJMP + 1), DE		; Now the code below is just like NXTOP function, but without the done status set, and plus EI
+
+FakeNXTOP				INC		BC			; This is the fake NXTOP code, with the JP at the end that jumps to the real JP CHECK
+						POP 	HL
+						EI					; EI is not in NXTOP but it was in Cleanexit
+PatchNXTOPJMP			JP		0			; This will be patched above
+
+
+ExitWithError			POP		IX											; Extract and push again real IX value from stack
+						PUSH 	IX		
+						SET 	7, (IX + MALUVA_REPORT_FLAG)				; Mark error has happened
+						LD 		A, (IX + MALUVA_REPORT_FLAG)				
+						AND 	1											; If bit 0 of flag 28 was set, then also exit extern without marking as DONE
+						JR 		NZ, cleanExitNotdone
+						JR 		cleanExit
 
 ; Both read savegame and load savegame use the same code, that is just slightly modified before jumping in the common part at DoReadOrWrite
 
@@ -261,13 +305,19 @@ CloseFile			LD 		A, $FF			; That $FF will be modifed by code above
 
 diskFailure			LD 		L, 57			; E/S error
 DAADSysmesCall		CALL    DAAD_SYSMESS_ES
-					JR 		cleanExit
+					JR 		ExitWithError
 
 
 XPart				LD 		A, D
 					ADD		'0'
 					LD      (XMESSFilename), A
 					JR 		cleanExit
+
+XUndone				POP IX				; Make sure IX is correct
+					PUSH IX
+					RES		4, (IX-1)						
+					JP 		cleanExitNotdone
+
 
 XMessage			LD 		L, D ;  LSB at L
 					POP 	IX
@@ -285,7 +335,7 @@ XMessage			LD 		L, D ;  LSB at L
 					LD   	IX, XMESSFilename
 					RST     $08
                     DB      F_OPEN      
-                    JR      C, cleanExit
+                    JP      C, ExitWithError
 					LD 		(CloseFile+1),A ; Preserve file handle to be able to close it later
 					LD 		(XmessReadFile+1),A ; Preserve file handle to be able to read from it
 ; Seek file					

@@ -38,12 +38,16 @@
 
             			define JIFFY					$FC9E ; The timer variable
 
+            			define MALUVA_REPORT_FLAG	20
+
 
 Start                   
                         DI
 ; ---- Preserve registers
                         PUSH    BC
                         PUSH    IX
+       					RES		7,(IX+MALUVA_REPORT_FLAG)	; Clear bit 7 of flag 28 (mark of EXTERN executed)
+
 
 
 ; --- Check function selected
@@ -61,7 +65,11 @@ Start
 						JP      Z, XPart
 						CP 		5
 						JP 		Z, XBeep
-                        JP      cleanExit
+	    				CP  7
+    					JP  Z, XUndone
+						CP 		255
+						JP 		Z, RestoreXMessage
+                        JP      ExitWithError
 
 ; ---- Set the filename
 loadImg                 LD      A, D
@@ -80,11 +88,16 @@ loadImg                 LD      A, D
                         LD      (HL),A
 
 
+   						LD A, $FF               ; If a file was open, then the workbuffer  is going to be overwritten by the picture, so any Xmessage loaded there will be corruted, we set last XMessage file to 255 to avoid data to be used
+						LD (LastOffset), A	
+						LD (LastOffset+1), A	
+
+
 ; --- Open file        
                         LD      HL, ImageFilename                    
                         CALL    openFile                        ; Prepares the FCB and opens the file
                         OR      A                               ; On failure to open, exit
-                        JR      NZ, cleanExit
+                        JR      NZ, ExitWithError
 
 ; --- Patch FCB so record size for reading is 1, and define where to read to when reading
                         LD      DE, WorkBuffer
@@ -127,6 +140,41 @@ cleanExit               POP     IX
                         POP     BC
                         EI
                         RET
+
+
+; It happens the DAAD code sets the "done" status after the execution of an EXTERN, something which happens in a function called NXTOP, which does a few thing and then jumps to 
+; another function named CHECK. Due to that , it is not possible to exit an EXTERN without getting the done status set. To avoid that we are going to go through the DAAD interpreter
+; code to make what NXTOP does, and then jump to the JP CHECK at the end of that NXTOP function.
+
+cleanExitNotdone		POP 	IX			; Copied from Cleanexit, without the EI
+						POP 	BC
+						
+						POP 	HL			;This is the return address for Extern, there we should fin the "JP NXTOP" 
+						INC 	HL			;Now we are pointing to address where NXTOP is stored
+						LD 		E, (HL)
+						INC 	HL
+						LD 		D, (HL)		; Now DE contains NXTOP
+						INC 	DE
+						INC 	DE
+						INC 	DE
+						INC 	DE
+						INC 	DE
+						INC 	DE							; Inc six times to skip all code in NXTOP up to the JP CHECK
+						LD  	(PatchNXTOPJMP + 1), DE		; Now the code below is just like NXTOP function, but without the done status set, and plus EI
+
+FakeNXTOP				INC		BC			; This is the fake NXTOP code, with the JP at the end that jumps to the real JP CHECK
+						POP 	HL
+						EI					; EI is not in NXTOP but it was in Cleanexit
+PatchNXTOPJMP			JP		0			; This will be patched above
+
+
+ExitWithError			POP		IX											; Extract and push again real IX value from stack
+						PUSH 	IX		
+						SET 	7, (IX + MALUVA_REPORT_FLAG)				; Mark error has happened
+						LD 		A, (IX + MALUVA_REPORT_FLAG)				
+						AND 	1											; If bit 0 of flag 28 was set, then also exit extern without marking as DONE
+						JR 		NZ, cleanExitNotdone
+						JR 		cleanExit
 
 
 ; ******************* SAVE AND LOAD GAME ROUTINES   *************************************************
@@ -173,7 +221,7 @@ diskFailure             LD      A, 57                           ; E/S error sysm
                         CALL    DAAD_SYSMESS
                         POP     HL                              
                         LD      (HL),03                         ; and this restores POP HL
-                        JR      cleanExit                        
+                        JR      ExitWithError
 
 prepareSaveGame         LD      A, ($B001)
                         CP      $3A
@@ -313,6 +361,13 @@ createFile              CALL    prepareFCB
                         CALL    BDOS                  
                         RET
 
+
+XUndone			    	POP IX				; Make sure IX is correct
+				    	PUSH IX
+				    	RES		4, (IX-1)						
+				    	JP 		cleanExitNotdone
+
+
 ; XPart function
 XPart				    LD 		A, D
 					    ADD		'0'
@@ -400,7 +455,17 @@ xMessage			    LD 		L, D ;  LSB at L
 				    	PUSH 	IX
 				    	LD 		A, (BC)
 				    	LD 		H, A ; MSB AT H, so Message address at HL
-                        LD      (WorkBuffer), HL
+
+
+						LD 		IX, (LastOffset)  ; Let's check if it's same message than last time
+						CP 		IXH
+						JR 		NZ, NotSameMessage
+						LD 		A, L
+						CP 		IXL
+						JR 		Z, XmessPrintMessage  ;If same offset, just print again
+
+
+NotSameMessage          LD      (LastOffset), HL
                         
 ; ------- Open file      
 
@@ -414,7 +479,7 @@ xMessage			    LD 		L, D ;  LSB at L
 
 ; ------- Seek File              
 
-                        LD      HL, (WorkBuffer)
+                        LD      HL, (LastOffset)
                         LD      (FCB+33), HL                     ; At FCB+33 there is a 32 bit value meaning the offest of the file
                         XOR     A
                         LD      (FCB+35),A
@@ -427,14 +492,56 @@ xMessage			    LD 		L, D ;  LSB at L
                         CALL    BDOS
 
 ; ------- Print message 
-                        LD      HL, WorkBuffer
-                        CALL    $BD9D
+                        ; OK, this below needs to be explained: I didn't find a way to call the DAAD function to print text and make it work with an xmessage already loaded in RAM. Everything
+						; worked but the \n or  #n carriage return. The function was at address $1629 in the spanish interpreter. Then I decided to do the following: try to make the text
+						; being printed by the MES condact, and to do that I as going to execute a MES condact. How do I do that?
+						; 1) I modified first entry in the messages offsets table, preserving the value there before, to the address where the xmessage is loaded in RAM
+						; 2) I was udpating BC and making sure it is returned modified to the stack. DAAD uses BC as it's internal "PC" register, so changing BC actually makes DAAD run 
+						;    opcodes somewhere else. I pointed it to a zone in RAM (see below) where I already had sorted two condacts: MES 0, and EXTERN 0 255. MES 0 prints the text 
+						;    using MES condact and then EXTERN 0 255...
+						; 3) is another function in Maluva I'm using to restore the Message 0 pointer, and restoring BC, so the execution continues just after the XMES/XMESSAGE call
 
 
-; ------- Close File
+XmessPrintMessage   	LD 		HL, $0112      ; DAAD Header pointer to SYSMESS table
+						LD 		E, (HL)
+						INC 	HL
+						LD 		D, (HL)
+						EX      HL, DE		   ; HL points to SYSMESS pointers table
+						LD 		E, (HL)
+						INC		HL
+						LD 		D, (HL)  		; Now DE has the value of first message pointer, and HL points to where that pointer is
+
+						LD      (PreserveFirstSYSMES),DE
+						LD		DE, WorkBuffer
+						LD 		(HL), D
+						DEC		HL
+						LD 		(HL), E			; Store the offset at first message pointer 
+
+						POP 	IX
+						POP 	BC
+						LD 		(PreserveBC), BC
+						LD 		BC, FakeCondacts - 1		; Make DAAD "PC" point to our fake condacts
+						PUSH 	BC
+						PUSH 	IX
+
                         JP      cleanAndClose
 
+						; So this is an unreachable (by the Z80 CPU) piece of codem which is actually DAAD code 
+FakeCondacts			DB 		$36, 0,     $3D, 0, $FF   ; SYSMESS 0 EXTERN 0 255
 
+                        
+RestoreXMessage			LD 		HL, $0112      ; DAAD Header pointer to SYSMESS table
+						LD 		E, (HL)
+						INC 	HL
+						LD 		D, (HL)
+						LD 		HL, PreserveFirstSYSMES
+						LDI
+						LDI
+						POP 	IX
+						POP 	BC
+						LD 		BC, (PreserveBC)
+						EI
+						RET
           
 
 ; ---------------------------------------------------------------------------
@@ -460,6 +567,9 @@ DivByTenNoSub
 ImageFilename           DB      "000     MS2"
 SavegameFilename        DB      "UTO     SAV"        
 XMESSFilename			DB      "0       XMB"
+PreserveFirstSYSMES		DW      0
+PreserveBC				DW      0
+LastOffset              DW      $FFFF
 WorkBuffer              DS      $200                                                ; WE only need $100 for the pictures buffer but we are using $200 for XMEssages, so we 
 
 

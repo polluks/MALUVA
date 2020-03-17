@@ -20,6 +20,8 @@
 
             			define JIFFY					$FC9E ; The timer variable
 
+						define MALUVA_REPORT_FLAG	20
+
 
 ; ********************************************************************                        
 ;                           CONSTANTS 
@@ -30,6 +32,7 @@ Start
 ; ---- Preserve registers
                         PUSH    BC
                         PUSH    IX
+						RES		7,(IX+MALUVA_REPORT_FLAG)	; Clear bit 7 of flag 28 (mark of EXTERN executed)
 
 
 ; --- Check function selected
@@ -39,9 +42,11 @@ Start
                         JP      Z, xMessage
 						CP      4
 						JR      Z, XPart
+						CP  7
+						JP  Z, XUndone
 						CP 		255
-						JP 		Z, RestoreXMessage
-                        JR      cleanExit
+						JP 		Z, PreserveFirstSYSMESMessage
+                        JR      ExitWithError
 
 cleanAndClose           CALL closeFile
 
@@ -50,7 +55,47 @@ cleanExit               POP     IX
                         EI
                         RET
 
-                        
+; It happens the DAAD code sets the "done" status after the execution of an EXTERN, something which happens in a function called NXTOP, which does a few thing and then jumps to 
+; another function named CHECK. Due to that , it is not possible to exit an EXTERN without getting the done status set. To avoid that we are going to go through the DAAD interpreter
+; code to make what NXTOP does, and then jump to the JP CHECK at the end of that NXTOP function.
+
+cleanExitNotdone		POP 	IX			; Copied from Cleanexit, without the EI
+						POP 	BC
+						
+						POP 	HL			;This is the return address for Extern, there we should fin the "JP NXTOP" 
+						INC 	HL			;Now we are pointing to address where NXTOP is stored
+						LD 		E, (HL)
+						INC 	HL
+						LD 		D, (HL)		; Now DE contains NXTOP
+						INC 	DE
+						INC 	DE
+						INC 	DE
+						INC 	DE
+						INC 	DE
+						INC 	DE							; Inc six times to skip all code in NXTOP up to the JP CHECK
+						LD  	(PatchNXTOPJMP + 1), DE		; Now the code below is just like NXTOP function, but without the done status set, and plus EI
+
+FakeNXTOP				INC		BC			; This is the fake NXTOP code, with the JP at the end that jumps to the real JP CHECK
+						POP 	HL
+						EI					; EI is not in NXTOP but it was in Cleanexit
+PatchNXTOPJMP			JP		0			; This will be patched above
+
+
+ExitWithError			POP		IX											; Extract and push again real IX value from stack
+						PUSH 	IX		
+						SET 	7, (IX + MALUVA_REPORT_FLAG)				; Mark error has happened
+						LD 		A, (IX + MALUVA_REPORT_FLAG)				
+						AND 	1											; If bit 0 of flag 28 was set, then also exit extern without marking as DONE
+						JR 		NZ, cleanExitNotdone
+						JR 		cleanExit
+
+
+
+XUndone				POP IX				; Make sure IX is correct
+					PUSH IX
+					RES		4, (IX-1)						
+					JR 		cleanExitNotdone
+
 
 ; XPart function
 XPart				    LD 		A, D
@@ -60,7 +105,7 @@ XPart				    LD 		A, D
 
 
 ; XBeep , beep replacement
-
+/*
 XBeep				    LD 		L, D    ; First parameter (duration) to L					
 						POP 	IX
 						POP 	BC
@@ -69,53 +114,63 @@ XBeep				    LD 		L, D    ; First parameter (duration) to L
                         LD      E, A
 						XOR 	A
 						LD 		D, A  ;  At this point, DE=tone, L=duration
+						LD 		H, A
 						PUSH 	BC
 						PUSH 	IX
 
-						LD   IX,sfxFreqPSG - 48	; DE=get frequency from tone table
-						ADD  IX,DE
-						LD   E,(IX+0)
-						LD   D,(IX+1)
-
-						LD   C,$A1
-
-						XOR  A					; REG#0 ChannelA Tone LowByte
-						OUT  ($A0),A
-						OUT  (C),E
-						INC  A					; REG#1 ChannelA Tone HighByte
-						OUT  ($A0),A
-						OUT  (C),D
-
-						LD   A,8				; REG#8 ChannelA Volume to 8
-						OUT  ($A0),A
-						OUT  (C),A
-
-						LD   A,7				; REG#7 Mixer enable ChannelA
-						OUT  ($A0),A
-						LD   A,00111110b
-						OUT  ($A1),A
-
-BeepSilence				EX   DE,HL
-						SRL  E
-						CALL NZ,SilenceWait
-					
-						LD   A,7				; REG#7 Mixer disable ChannelA
-						OUT  ($A0),A
-						LD   A,00111111b
-						OUT  ($A1),A
-
-						JP   cleanExit
-
-SilenceWait									; Wait for E = 1/50 seconds
-                        EI
-						LD  HL,JIFFY			; Cogemos la address donde se cuenta el tiempo en 1/50sec
-loop0					LD  A,(HL)
-loop1					CP  (HL)
-						JR  Z,loop1
-						DEC E
-						JR  NZ,loop0
-                        DI
+						LD   	IX,sfxFreqPSG - 48	; DE=get frequency from tone table
+						ADD  	IX,DE
+						LD   	E,(IX+0)
+						LD   	D,(IX+1)			; Now HL= duration, DE=frequency
+						CALL 	buzzer 											
+						LD 	 	A, 12
+						OUT		($F8),A				; Silence buzzer
 						RET
+
+buzzer 					LD 		A, L				; Preserve L
+						SRL 	L
+						SRL 	L
+						CPL
+						AND 	3
+						LD 		C,A
+						LD 		B,0
+						LD 		IX, buzzDelay
+						ADD		IX, BC
+						LD 		A, 11
+buzzDelay				NOP
+						NOP						
+						NOP						
+						INC 	B
+						INC 	C
+beepLoop				DEC     C
+						JR 		NZ, beepLoop
+						LD 		C, $3F
+
+						DEC 	B
+						JR 		NZ, beepLoop
+						INC 	A
+						CP 		13
+						JR  	NZ, cnLoop
+
+
+						DEC 	A
+						DEC 	A
+cnLoop					OUT 	($F8),A
+
+						LD 		B,H
+						LD 		C,A
+						CP 		11
+						JR 		NZ, anotherBeep
+						LD 		A, D
+						OR 		E
+						RET 	NZ
+						LD 		A, C
+						LD 		C, L
+						DEC 	DE
+						JP      (IX)
+anotherBeep				LD 		C, L
+						INC 	C
+						JP      (IX)
 
 ; Frequencies table
 sfxFreqPSG				DW	0xD65, 0xC9D, 0xBEB, 0xB42, 0xA9A, 0xA04, 0x971, 0x8E8, 0x86B, 0x7E2, 0x77F, 0x719	// Octave 1 (48-70) 
@@ -126,7 +181,7 @@ sfxFreqPSG				DW	0xD65, 0xC9D, 0xBEB, 0xB42, 0xA9A, 0xA04, 0x971, 0x8E8, 0x86B, 
 						DW	0x06B, 0x065, 0x05F, 0x05A, 0x055, 0x050, 0x04C, 0x047, 0x043, 0x040, 0x03C, 0x039	// Octave 6 (168-190)
 						DW	0x036, 0x033, 0x030, 0x02D, 0x02A, 0x028, 0x026, 0x024, 0x022, 0x020, 0x01E, 0x01C	// Octave 7 (192-214) 
 						DW	0x01B, 0x019, 0x018, 0x017, 0x015, 0x014, 0x013, 0x012, 0x011, 0x010, 0x00F, 0x00E  // Octave 8 (216-238)
-
+*/
 
 ; Xmessage printing
 xMessage			    LD 		L, D ;  Offset MSB
@@ -143,7 +198,7 @@ xMessage			    LD 		L, D ;  Offset MSB
                         LD      HL, XMESSFilename
                         CALL    openFile                        ; Prepares the FCB and opens the file
                         OR      A                               ; On failure to open, exit
-                        JP      NZ, cleanExit
+                        JP      NZ, ExitWithError
 
 
 
@@ -201,11 +256,11 @@ ReadLoop                LD      (FCB+$21), HL                   ; Define file of
 						; 3) is another function in Maluva I'm using to restore the Message 0 pointer, and restoring BC, so the execution continues just after the XMES/XMESSAGE call
 
 
-						LD 		HL, $0110      ; DAAD Header pointer to MESSAGES table
+						LD 		HL, $0112      ; DAAD Header pointer to SYSMESS table
 						LD 		E, (HL)
 						INC 	HL
 						LD 		D, (HL)
-						EX      HL, DE		   ; HL points to message pointers table
+						EX      HL, DE		   ; HL points to SYSMESS pointers table
 						LD 		E, (HL)
 						INC		HL
 						LD 		D, (HL)  		; Now DE has the value of first message pointer, and HL points to where that pointer is
@@ -227,10 +282,10 @@ ReadLoop                LD      (FCB+$21), HL                   ; Define file of
 						JP      cleanAndClose  ; Close file and exit
 
 						; So this is an unreachable (by the Z80 CPU) piece of codem which is actually DAAD code 
-FakeCondacts			DB 		$4D, 0,     $3D, 0, $FF   ; MES 0 EXTERN 0 255
+FakeCondacts			DB 		$36, 0,     $3D, 0, $FF   ; SYSMESS 0 EXTERN 0 255
 
                         
-RestoreXMessage			LD 		HL, $0110      ; DAAD Header pointer to MESSAGES table
+PreserveFirstSYSMESMessage			LD 		HL, $0112      ; DAAD Header pointer to SYSMESS table
 						LD 		E, (HL)
 						INC 	HL
 						LD 		D, (HL)
