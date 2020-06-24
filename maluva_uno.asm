@@ -2,9 +2,10 @@
 ; LGPL License applies, see LICENSE file
 ; TO BE COMPILED WITH SJASMPLUS
 ; Thanks to Boriel for his 8 bits division code in ZX-Basic, DivByTen function is based on his code
+; Thanks to Mcleod_ideafix and Yombo for help and brainstorming that lead to this feature done this way
 
 			ORG $843C
-            OUTPUT  MLV_ESX.BIN
+            OUTPUT  MLV_UNO.BIN
 	
 
 ; ********************************************************************                        
@@ -12,15 +13,16 @@
 ; *******************************************************************
 
 
-			define M_GETSETDRV  	$89
-			define F_OPEN  		$9a
-			define F_CLOSE 		$9b
-			define F_READ  		$9d
-			define F_WRITE 		$9e
-			define F_SEEK		$9f       
-			define FA_READ 		$01
-			define FA_WRITE		$02
-			define FA_CREATE_AL	$0C
+			define M_GETSETDRV  		$89
+			define F_OPEN  				$9a
+			define F_CLOSE 				$9b
+			define F_READ  				$9d
+			define F_WRITE 				$9e
+			define F_SEEK				$9f       
+			define FA_READ 				$01
+			define FA_WRITE				$02
+			define FA_CREATE_AL			$0C
+			define BANKM 				$5B5C
 
 			define INTERPRETER_ADDRESS $6000  ; Address where the interpreter is loaded
 
@@ -39,10 +41,23 @@
 			
 			define DDB_SYSMESS_TABLE_ADDR $8412 ;  Location of the pointer to the SYSMESS table in the DDB header
 
-			define DAAD_PATCH_ES $707A		    ; Address where the interpreter sets the internal flag which makes the words be cutted when printed
-			define DAAD_PATCH_EN $701A	
+			define DAAD_PATCH_ES 		$707A		    ; Address where the interpreter sets the internal flag which makes the words be cutted when printed
+			define DAAD_PATCH_EN 		$701A	
 
 			define MALUVA_REPORT_FLAG	20
+
+      		define ZXUNO_PORT 			$FC3B
+			define REG_SCANDBLCTRL 		$0B
+			define REG_RASTERLINE  		$0C
+			define REG_RASTERCTRL  		$0D
+			define REG_DEVCONTROL		$0E
+			define REG_DEVCTRL2			$0F
+
+			define ULAPLUS_CTRL_PORT 	$BF3B
+			define ULAPLUS_DATA_PORT	$FF3B
+
+			define BOTTOM_SPLIT_LINE    248
+			define MIDDLE_SPLIT_LINE    96
 		
 
 
@@ -68,24 +83,29 @@ Spanish				LD 		A, $C9					; (RET)
 LangCont			POP 	AF
 
 			
-Init				LD 	D, A		; Preserve first parameter
-					LD 	A, (BC)		; Get second parameter (function number) on A
+Init				LD 		D, A		; Preserve first parameter
+					LD 		A, (BC)		; Get second parameter (function number) on A
 
-					OR 	A
-					JR 	Z, LoadImg
-					CP 	1
-					JP 	Z, SaveGame
-					CP 	2
-					JP 	Z, LoadGame
-					CP  3
-					JP 	Z, XMessage
-					CP  4
-					JP  Z, XPart
-					CP  7
-					JP  Z, XUndone
+					OR 		A
+					JR 		Z, LoadImg
+					CP 		1
+					JP 		Z, SaveGame
+					CP 		2
+					JP 		Z, LoadGame
+					CP 		3
+					JP 		Z, XMessage
+					CP 		4
+					JP 		Z, XPart
+					CP 		6
+					JP 		Z, XSplitScreen
+					CP  	7
+					JP 		Z, XUndone
+					CP  	10
+					JP 	Z	, XSpeed
+
 					CP 		255
 					JP 		Z, RestoreXMessage
-					JP 	ExitWithError
+					JP 		ExitWithError
 ; ---- Set the filename
 LoadImg
 					LD 	A, D		; Restore first parameter
@@ -120,71 +140,86 @@ LoadImg
 ;  --- From this point we don't check read failure, we assume the graphic file is OK. Adding more fail control would increase the code size and chances of fail are low from now on
 
 
-; --- Preserve A register, containing the file handle 
-                    LD      D,A	
+; --- Update code to use file handler obtained
+                    LD      (drawHalfScreen + 1),A	
+					LD      (CloseImgFile + 1),A	
+					LD      (drawLoop + 1),A	
 
-; --- read header
-					LD 	IX, ImgNumLine
-					PUSH 	DE
-					PUSH 	BC
-					LD      BC, 1
+; --- read palette
+					LD 		IX, XMessBuffer		; Ah, yes, we are using the same buffer we use for Xmessages, to avoid wasting 64 bytes more
+					LD      BC, 64
 					RST     $08
 					DB      F_READ     
-					POP 	BC
-					POP 	DE
-					LD 	A, (ImgNumLine) ; A register contains number of lines now
-                                            
 
-; read data - for Spectrum we start by reading  as much thirds of screen as possible, in the first byte of file the number of lines appears, so if there is carry when comparing to 64,
-;             it means there are less than 128 lines, and if there is carry when comparing to 128, it means there are more than 128 but less than 192. If no carry, then it's a full
-;	      screen. 
+; --- set the palette
 
-			
-					SUB 	64
-					JR 		C, drawPartialThird0  ; if thre is no carry, there is at least one whole third of screen
-					LD 		BC, 2048
-					LD 		H, B
-					LD 		L, C
-					SUB 	64
-					JR 		C, drawWholeThirds   ;if there is still no carry, there are at least two thirds of screen
-					ADD 	HL, BC
-nextThird	        SUB 	64
-					JR 		C, drawWholeThirds ; if there is still no carry, it's a full screen (3 thirds)
-					ADD		HL, BC	           ; read one, two or the three whole thirds
-drawWholeThirds		LD 		B, H
-					LD 		C, L		
-					LD 		IX, VRAM_ADDR
-					PUSH    AF
-					LD 		A, D 		; file handle
-					PUSH 	DE
+					LD 		HL, XMessBuffer
+					LD 		E, 0
+PaletteLoop			LD 		BC, ULAPLUS_CTRL_PORT
+					LD 		A, E
+					OUT		(C),A
+					LD 		BC, ULAPLUS_DATA_PORT
+					LD 		A, (HL)
+					OUT		(C),A
+					INC 	HL
+					INC 	E
+					LD 		A, E
+					CP 		64
+					JR 		NZ, PaletteLoop
+
+; --- Page in Page 7
+
+pageIn				LD   	E, 7              ;switch in RAM page 7
+					CALL   	page128KBank
+
+; --- Load Pixels data 
+					LD	 	IX, $C000
+					CALL 	drawHalfScreen ; Read half second third
+
+; --- Load Attrs data at E000
+
+					LD	 	IX, $E000
+					CALL 	drawHalfScreen ; Read half second third
+
+; --- Page in bank 0
+
+pageOut				LD 		E, 0
+					CALL   	page128KBank
+
+
+; ---- Close file	
+CloseImgFile		LD 		A, 0
 					RST     $08
-					DB      F_READ
-					POP 	DE
-					POP 	AF
-					LD 		IX, VRAM_ADDR
-					ADD 	IX, BC		; Hl points to next position in VRAM to paint at
-					JR 		drawPartialThird
-                        
-; --- This draws the last third, that is an uncomplete one, to do so, the file will come prepared so instead of an standar third with 8 character rows, it's a rare third with less rows.
-;     For easier undesrtanding we will call 'row" each character row left, and 'line' each pixel line left, so each row is built by 8 lines.
-;     Usually, you can read all first pixel lines for each rows in a third by reading 256 bytes (32 * 8), but if instead of 8 rows we have less, then we have to read 32 * <number of rows>
-;     To determine how many rows are left we divide lines left by 8, but then to calculate how many bytes we have to read to load first pixel line for those rows we multiply by 32,
-;     so in the end we multiply by 4. Once we know how much to read per each iteration we have to do 8 iterations, one per each line in a character. So we first prepare <lines left>*4 in
-;     BC register,and then just read BC bytes 8 times, increasin IX (pointing to VRAM) by 256 each time to point to the next line inside the row
+                    DB      F_CLOSE
+	
+cleanExit			POP 	IX
+					POP 	BC
+					EI
+					RET
 
-drawPartialThird0		LD 		IX, VRAM_ADDR  ; If the image does not cover a whole third at all, IX is not initialized so it is initialized here
+; --- Pages 128K bank at register E at $C000 (must be 0-7)
+page128KBank		LD   BC,$7FFD       ; I/O address of horizontal ROM/RAM switch
+					LD   A,(BANKM)      ; get current switch state
+					AND  $F8            ; RAM page 0
+					OR 	 E
+					LD   (BANKM),A      ; update the system variable (very important)
+					OUT  (C),A          ; make the switch						
+					RET
+					
 
-
-
-drawPartialThird    ADD		A, 64		; restore the remaining number of lines (last SUB went negative)                
-                    OR 		A
-                    JR 		Z, readAttr	; if A = 0, then there were exactly  64, 128, or 192 lines, just jump to attributes section	
-					ADD		A, A
-					ADD		A, A		; A=A*4. Will never exceed 1 byte as max value for lines is 63, and 63*4 = 252
-					LD 		B, 0
-					LD 		C, A		; BC = number of bytes to read each time (numlines/ 8 x 32). 
+; --- Loads from file the information for half a screen (96 lines) to the address set at IX
+drawHalfScreen	   	LD 		A, 0		; read first thrid
+					LD      BC, 2048
+					PUSH 	IX
+					PUSH 	BC
+					RST     $08
+					DB      F_READ 
+					POP		BC
+					POP 	IX
+					ADD 	IX, BC		; read half of second third
+					LD		BC, 128		; 4 character lines remaining (4*32)
 					LD 		E, 8		; Times to do the loop, will be used as counter. We don't use B and DJNZ cause we need BC all the time and in the end is less productive
-drawLoop			LD 		A, D 		; file handle
+drawLoop			LD 		A, 0 		; file handle
 					PUSH 	DE
 					PUSH 	IX
 					RST     $08
@@ -194,32 +229,6 @@ drawLoop			LD 		A, D 		; file handle
 					POP 	DE
 					DEC 	E
 					JR 	NZ, drawLoop
-
-; read the attributes 
-
-readAttr			XOR 	A
-					LD		H, A
-					LD 		A, (ImgNumLine)	; restore number of lines
-					LD 		L, A			; now HL = number of lines 
-					ADD 	HL, HL
-					ADD 	HL, HL			; Multiply by 4 (32 bytes of attributes per each 8 lines  = means 4 per line)
-					PUSH 	HL
-					POP 	BC
-					LD 		IX, VRAM_ATTR_ADDR	; attributes VRAM
-					LD 		A, D 			; file handle
-					PUSH	DE
-					RST 	$08
-					DB 		F_READ
-					POP		DE
-
-; ---- Close file	
-					LD 		A, D
-					RST     $08
-                    DB      F_CLOSE
-	
-cleanExit			POP 	IX
-					POP 	BC
-					EI
 					RET
 
 ; It happens the DAAD code sets the "done" status after the execution of an EXTERN, something which happens in a function called NXTOP, which does a few thing and then jumps to 
@@ -303,7 +312,7 @@ CloseFile			LD 		A, $FF			; That $FF will be modifed by code above
                  	DB      F_CLOSE
 
 
-					JR 		cleanExit	
+					JP 		cleanExit	
 
 diskFailure			LD 		L, 57			; E/S error
 DAADSysmesCall		CALL    DAAD_SYSMESS_ES
@@ -313,13 +322,97 @@ DAADSysmesCall		CALL    DAAD_SYSMESS_ES
 XPart				LD 		A, D
 					ADD		'0'
 					LD      (XMESSFilename), A
-					JR 		cleanExit
+					JP 		cleanExit
 
 XUndone				POP IX				; Make sure IX is correct
 					PUSH IX
 					RES		4, (IX-1)						
 					JP 		cleanExitNotdone
 
+
+; XSplitScreen chages the interrupt mode to raster, and sets if active at XSplitActive. Once started it can be stopped, but the interrupts will continue to be raster based,
+; and the one at bottom of scree will just not change to Timex mode
+XSplitScreen		CALL 	ZXUnoInit
+					
+
+					LD 		A, D
+					LD 		(XSplitActive), A	
+					OR 		A
+					JP 		Z, cleanExit
+XSplitEnable		
+;------             Set Raster Interrupt
+					LD 		E, BOTTOM_SPLIT_LINE
+					CALL 	SetRasterINT
+					JP 		cleanExit
+
+SetRasterINT		LD 		BC, ZXUNO_PORT
+					LD 		A, REG_RASTERLINE
+					OUT 	(C), A
+					INC 	B
+					LD 		A, E
+					OUT 	(C), A				; Set Raster line to that which comes in E
+					
+				
+					DEC 	B
+					LD 		A, REG_RASTERCTRL
+					OUT 	(C), A
+					INC 	B
+					LD 		A, 00000110b ; Enable raster INT, disable normal int, bit 9 of rasterline set to 0 too
+					OUT 	(C), A
+					RET
+
+
+ZXUnoInit			LD BC, 	ZXUNO_PORT				; Make sure 128K pagination is ON
+					LD A, REG_DEVCONTROL
+					OUT (C),A
+					INC B
+					IN A, (C)
+					AND 11111011b 					; Make sure bit 2, DI7FFD, is 0
+					OUT (C), A
+
+					DEC B							; Make sure Timex modes adn ULAPLUS are ON
+					LD A, REG_DEVCTRL2
+					OUT (C),A
+					INC B
+					IN A, (C)
+					AND 11111100b				   ; make sure bits 0 and 1, DITIMEX and DIULAPLUS, value is 0
+					OUT (C), A
+
+					LD 		A, 16					; Initialize BANKM as we may not be in pure 128K mode (either 48K or 128K but USR 0)
+					LD      (BANKM), A
+					RET
+					
+
+XSpeed				LD A, D
+					OR A
+					LD A, 126
+					
+					JR NZ, XSpeed2
+					LD A, 63
+XSpeed2				LD (LoseTimeLoop-1), A
+					CALL SetUnoSpeed
+					JP cleanExit
+
+
+					
+
+
+SetUnoSpeed			LD 		A, D
+					CP  	2
+					JP 		NC, cleanExit				; Value > 2, invalid CPU speed
+					AND 	1
+					RRCA
+					RRCA
+					LD 		D, A						; Now mode is in bits 6-7 of D
+					LD 		BC, ZXUNO_PORT
+					LD 		A, REG_SCANDBLCTRL
+					OUT 	(C),A
+					INC 	B
+					IN   	A, (C)
+					AND 	$3F
+					OR 		D
+					OUT 	(C),A
+					RET
 
 XMessage			LD 		L, D ;  LSB at L
 					POP 	IX
@@ -334,7 +427,7 @@ XMessage			LD 		L, D ;  LSB at L
 					LD 		H, A ; MSB AT H, so Message address at HL
 					LD	 	(XMessBuffer), HL   ; Preserve file offset, using the buffer as temporary address
 					CALL 	setDefaultDisk
-					JR 		C, diskFailure
+					JP 		C, diskFailure
 ; Open file					
 	                LD      B, FA_READ   
 					LD   	IX, XMESSFilename
@@ -350,7 +443,7 @@ XMessage			LD 		L, D ;  LSB at L
 					LD L, 0
 					RST 	$08
 					DB 		F_SEEK
-					JR 		C, CloseFile
+					JP 		C, CloseFile
 
 ; Read file					
 					LD 		IX, XMessBuffer
@@ -458,13 +551,108 @@ PatchForEnglish			LD HL, DAAD_READ_FILENAME_EN
 						RET
 
 
-Filename				DB 	"UTO.ZXS",0
-ImgNumLine					DB 	0
+Filename				DB 	"UTO.UNO",0
 SaveLoadFilename		DB 	"PLACEHOLD.SAV",0
 SaveLoadExtension		DB 	".SAV", 0
 XMESSFilename			DB  "0.XMB",0
 PreserveFirstSYSMES		DW 0
 PreserveBC				DW 0
+XSplitActive			DB 0
 XMessBuffer				DS 512
+EndOfMainCode
 
+
+; ------------------------------------------------------------------------------
+; --------------- The interrupt Handlers ---------------------------------------
+; ------------------------------------------------------------------------------
+
+						ORG EndOfMainCode
+            			OUTPUT "MLV_UNO_INT.BIN",t					; Save to a separated file
+
+; ------------ Interrupt handler for XSplitScreen, called by every interrupt, including normal and raster
+InterruptHandler		DI
+						PUSH BC
+						PUSH HL
+						PUSH DE
+						PUSH AF
+
+; ----- Check which line it was	the raster interrupt
+						LD 		BC, ZXUNO_PORT
+						LD 		A, REG_RASTERLINE
+						OUT		(C),A
+						INC 	B
+						IN 		A, (C)
+						CP 		MIDDLE_SPLIT_LINE
+						JR 		Z, RasterMiddleHandler  
+						CP 		BOTTOM_SPLIT_LINE
+						JR 		Z, RasterBottomHandler
+						JR 		InterruptHandlerEndPre			; the interrupt is the standard ULA refresh one, do nothing but returning with carry set so DAAD runs usual IM1 code
+
+
+; --- if the interrupt happens at the middle raster line 
+RasterMiddleHandler		CALL 	DisableExtendedGraphics			
+						LD 		E, BOTTOM_SPLIT_LINE
+						CALL 	SetRasterINT					;Set Rater Int at scanlime BOTTOM_SPLIT_LINE
+						CCF										; Avoid DAAD executing the standar interrupt code
+						JR 		InterruptHandlerEnd
+
+; --- if the interrupt happens at the bottom raster line 
+RasterBottomHandler		LD 		A, (XSplitActive)				
+						OR 		A
+						JR 		Z, SkipExtendedGraphics
+						CALL	EnableExtendedGraphics
+SkipExtendedGraphics	LD 		E, MIDDLE_SPLIT_LINE
+						CALL	SetRasterINT					; Set Next raster int at 96
+
+InterruptHandlerEndPre	SCF										; Make DAAD do its usual interrupt code
+				
+InterruptHandlerEnd		POP 	AF
+						POP 	DE
+						POP		HL
+						POP 	BC
+						RET
+
+DisableExtendedGraphics 
+
+						LD B, 63
+LoseTimeLoop			DJNZ LoseTimeLoop
+
+						XOR 	A					; Disable Timex mode
+						OUT 	(255),A
+
+						LD   BC,$7FFD       ; the horizontal ROM switch/RAM switch I/O address
+						LD   A,(BANKM)      ; system variable that holds current switch state
+						AND  $F7            ; disable shadow RAM
+						LD   (BANKM),A      ; must keep system variable up to date (very important)
+						OUT  (C),A          ; make the switch
+
+
+						LD 		BC, ULAPLUS_CTRL_PORT
+						LD 		A, 01000000b 			 ; Normal mode
+						OUT 	(C),A
+						LD 		BC, ULAPLUS_DATA_PORT
+						LD 		A, 0					; Disable ULAPlus
+						OUT 	(C),A
+
+
+						RET
+
+EnableExtendedGraphics  LD 		BC, ULAPLUS_CTRL_PORT
+						LD 		A, 01000000b			; HiRes mode, bank 7
+						OUT 	(C),A
+						LD 		BC, ULAPLUS_DATA_PORT
+						LD 		A, 1					; Enable ULAPlus
+						OUT 	(C),A
+
+						LD 		A, 2					; Enable Timex mode (HiColor)
+						OUT 	(255),A
+
+						LD   BC,$7FFD       ; the horizontal ROM switch/RAM switch I/O address
+						LD   A,(BANKM)      ; system variable that holds current switch state
+						OR   8              ; enable shadow RAM
+						LD   (BANKM),A      ; must keep system variable up to date (very important)
+						OUT  (C),A          ; make the switch
+
+
+						RET
 
