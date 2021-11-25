@@ -37,7 +37,7 @@
 						define DEL_FAST_TICKER			 $BCE6
 						define FIRMWARE_MODE_NUMBER		 $B7C3
 						define DAAD_FAST_TICK_SPACE		 $A609  ;  This is a small area I've found, that is just after the frame flyback area
-						define UPPER_MODE				 0 ; default upper mode in split screen 
+						define UPPER_MODE				 1 ; default upper mode in split screen 
 						define LOWER_MODE				 1 ; default lower mode in split screen 
 						define FADE_TO_BLACK			 0 ; default fade or not when in split screen
 
@@ -409,10 +409,35 @@ sfxFreqAY				DW	0xD65, 0xC9D, 0xBEB, 0xB42, 0xA9A, 0xA04, 0x971, 0x8E8, 0x86B, 0
 						DW	0x01B, 0x019, 0x018, 0x017, 0x015, 0x014, 0x013, 0x012, 0x011, 0x010, 0x00F, 0x00E  // Octave 8 (216-238)
 
 
+; Some firmware versions or setups of the M4 interface seem to corrupt the buffer where the Xmesages are stored. As the Xmessage function
+; check if the xmessage to be printed is already loaded in RAM due to a previous request of same message (or a close one), if the CheckM4Corruption
+; happens, some extra text is printed sometimes. M4 seems to overwrite the buffer are with its version, so we check for corruption by
+; searching for " M4 " at the beggining of buffer, and if found we act as if there were nothing in the buffer and load the content from the
+; disk again		
+CheckM4Corruption		LD HL, BUFFER2K_ADDR
+						LD A, (HL)
+						CP ' '
+						RET NZ ; No corruption
+						INC HL
+						LD A, (HL)
+						CP 'M'
+						RET NZ ; No corruption
+						INC HL
+						LD A, (HL)
+						CP '4'
+						RET NZ ; No corruption
+						INC HL
+						LD A, (HL)
+						CP ' '
+						RET NZ ; No corruption
+						; The string " M4 " has been found, so we should not use the content of the buffer
+						LD A, 255
+						LD (LastXmessFile), A
+						RET
 
 
-
-XMessage				LD 		L, D   ; First parameter (LSB) to L
+XMessage				CALL CheckM4Corruption
+						LD 		L, D   ; First parameter (LSB) to L
 						POP 	IX
 						POP 	BC
 						INC 	BC
@@ -629,6 +654,7 @@ HideScreen				LD 	HL, PaletteBuffer
 						RET
 
 
+
 ErrorMode				DB 	0				; 0 = Report errors in flag 128, 1= Report Errors as DONE status
 Filename				DB 	"000.CPC"
 ScansPer2kBuffer		DB 	0
@@ -642,6 +668,7 @@ LastPaletteBuffer 		DB 0,26,24,11  ; Last PaletteBuffer is 16 bytes long, but we
 						DS 12
 LastXmessFile			DB 255
 Time					DB 0			; Used by the MODE0/1 interrupt core
+M4_ROM_NAME				DB "M4 BOAR",0xC4   ; C4 = 'D' ASCII code with the 7th bit set
 EndOfMainCode
 
 

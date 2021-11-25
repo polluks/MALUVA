@@ -343,13 +343,17 @@ XMessage			LD 		L, D ;  LSB at L
                     JP      C, ExitWithError
 					LD 		(CloseFile + 1), A ; Preserve file handle to be able to close it later
 					LD 		(XmessReadFile + 1), A ; Preserve file handle to be able to read from it
-; Seek file					
-					LD		DE, (XMessBuffer)	 ; Restore file offset
-					LD 		BC, 0   			 ; BCDE --> Offset 
-					LD 		IXL, 0    			 ; L=0 --> Seek from start
-					LD L, 0
-					RST 	$08
-					DB 		F_SEEK
+					LD		(fSeekFileHandler + 1), A ; Same for fSeek feature
+; Seek file										; To be compatible with utoboot for ESXDOS, we are not using F_SEEK. Please notice we mean utoboot, not autoboot (https://github.com/Utodev/utoboot)
+
+;					LD		DE, (XMessBuffer)	 ; Restore file offset
+;					LD 		BC, 0   			 ; BCDE --> Offset 
+;					LD 		IXL, 0    			 ; L=0 --> Seek from start
+;					LD L, 0
+;					RST 	$08
+;					DB 		F_SEEK
+					LD 		HL, (XMessBuffer)
+					CALL 	fSeek
 					JR 		C, CloseFile
 
 ; Read file					
@@ -409,6 +413,38 @@ RestoreXMessage		LD 		HL, DDB_SYSMESS_TABLE_ADDR      ; DAAD Header pointer to S
 ;                           AUX FUNCTIONS
 ; *******************************************************************
 
+;***** replaces ESXDOS F_SEEK function so in case utoboot is used, where F_SEEK it's not available, the game still works fine
+; 		we will read first as much 512 byte blocks as possible, then the remaining, and that way the file pointer will be 
+; 		where F_SEEK would have moved it
+; 		@param HL = offset in the file (64K maximum)
+
+fSeek				OR A 			; Clear carry flag
+fSeekLoop			LD A, H
+					CP 2			; CP H,2 is like CP HL, 512
+					JR C, fSeekLastBlock
+					PUSH HL
+					LD  BC, 512
+					CALL fSeekRead
+					POP HL
+					RET C 			; If problems with reading, return
+					LD DE, 512
+					SUB HL, DE
+					JR fSeekLoop
+fSeekLastBlock		PUSH HL
+					POP BC	
+					CALL fSeekRead
+					RET
+
+fSeekRead			LD 		IX, XMessBuffer
+fSeekFileHandler	LD 		A, $FF; // Self modified above
+					RST     $08
+					DB      F_READ  ; Read 
+					RET 
+
+
+
+
+
 ; *** Makes filename read by DAAD to be compliant with ESXDOS 8+3 filenames***
 cleanSaveName			LD 	HL, DAAD_FILENAME_ADDR_ES			; address of filename requested
 						LD 	BC, $08FF			; we will use LDI together with DJNZ, B will work for DJNZ but we set C to $FF
@@ -431,7 +467,6 @@ setDefaultDisk			XOR	A
                         DB      M_GETSETDRV
                         RET
 			
-
 ; *** Divides A by 10 and returns the remainder in A and the quotient in D^***
 DivByTen				LD 	D, A			; Does A / 10
 						LD 	E, 10			; At this point do H / 10
@@ -459,7 +494,7 @@ PatchForEnglish			LD HL, DAAD_READ_FILENAME_EN
 
 
 Filename				DB 	"UTO.ZXS",0
-ImgNumLine					DB 	0
+ImgNumLine				DB 	0
 SaveLoadFilename		DB 	"PLACEHOLD.SAV",0
 SaveLoadExtension		DB 	".SAV", 0
 XMESSFilename			DB  "0.XMB",0
