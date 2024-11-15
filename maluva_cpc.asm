@@ -401,43 +401,53 @@ SetAYREG				PUSH BC
 ; Frequencies table
 sfxFreqAY				DW	0xD65, 0xC9D, 0xBEB, 0xB42, 0xA9A, 0xA04, 0x971, 0x8E8, 0x86B, 0x7E2, 0x77F, 0x719	// Octave 1 (48-70) 
 						DW	0x6B3, 0x64E, 0x5F5, 0x5A1, 0x54D, 0x502, 0x4B9, 0x474, 0x434, 0x3F9, 0x3C0, 0x38C	// Octave 2 (72-96)
-						DW	0x359, 0x327, 0x2F6, 0x2D1, 0x2A7, 0x281, 0x25C, 0x23A, 0x21A, 0x1FD, 0x1E0, 0x1C6, // Octave 3 (98-118) 
+						DW	0x359, 0x327, 0x2F6, 0x2D1, 0x2A7, 0x281, 0x25C, 0x23A, 0x21A, 0x1FD, 0x1E0, 0x1C6  // Octave 3 (98-118) 
 						DW	0x1AD, 0x194, 0x17D, 0x168, 0x153, 0x141, 0x12E, 0x11D, 0x10D, 0x0FE, 0x0F0, 0x0E3  // Octave 4 (120-142)
 						DW	0x0D6, 0x0CA, 0x0BF, 0x0B4, 0x0AA, 0x0A0, 0x097, 0x08F, 0x087, 0x07F, 0x078, 0x072	// Octave 5 (144-166) 
 						DW	0x06B, 0x065, 0x05F, 0x05A, 0x055, 0x050, 0x04C, 0x047, 0x043, 0x040, 0x03C, 0x039	// Octave 6 (168-190)
 						DW	0x036, 0x033, 0x030, 0x02D, 0x02A, 0x028, 0x026, 0x024, 0x022, 0x020, 0x01E, 0x01C	// Octave 7 (192-214) 
 						DW	0x01B, 0x019, 0x018, 0x017, 0x015, 0x014, 0x013, 0x012, 0x011, 0x010, 0x00F, 0x00E  // Octave 8 (216-238)
 
+; Returns (in A record) number of the ROM where M4 is, or 255 if not M4 found 
+; First execution really calculates if M4 is present, then the code is patched to be LD A, n - RET
+FindM4ROM				LD  	A, 201		; this line is just to be patched later
+						LD (FindM4ROM + 2), A ; patch this instrucion so it becomes a RET
 
-; Some firmware versions or setups of the M4 interface seem to corrupt the buffer where the Xmesages are stored. As the Xmessage function
-; check if the xmessage to be printed is already loaded in RAM due to a previous request of same message (or a close one), if the CheckM4Corruption
-; happens, some extra text is printed sometimes. M4 seems to overwrite the buffer are with its version, so we check for corruption by
-; searching for " M4 " at the beggining of buffer, and if found we act as if there were nothing in the buffer and load the content from the
-; disk again		
-CheckM4Corruption		LD HL, BUFFER2K_ADDR
-						LD A, (HL)
-						CP ' '
-						RET NZ ; No corruption
-						INC HL
-						LD A, (HL)
-						CP 'M'
-						RET NZ ; No corruption
-						INC HL
-						LD A, (HL)
-						CP '4'
-						RET NZ ; No corruption
-						INC HL
-						LD A, (HL)
-						CP ' '
-						RET NZ ; No corruption
-						; The string " M4 " has been found, so we should not use the content of the buffer
-						LD A, 255
-						LD (LastXmessFile), A
+						ld		D,127		; start looking for from (counting downwards)
+
+romloop					PUSH 	DE
+						LD		C,D
+						CALL	$B90F		; system/interrupt friendly
+						LD		A,($C000)
+						CP		1
+						JR		NZ, not_this_rom
+						LD		HL,($C004)	; get rsxcommand_table
+						LD		DE,M4_ROM_NAME	; rom identification line
+cmp_loop				LD		A,(DE)
+						XOR		(HL)			; hl points at rom name
+						JR		Z, match_char
+not_this_rom:
+						POP		DE
+						DEC		D
+						JR		NZ, romloop
+						LD		A,255		; not found!
+						LD 		(FindM4ROM + 1), A ; patch frist LD i FindM4ROM
+						RET
+match_char
+						LD		A,(DE)
+						INC 	HL
+						INC		DE
+						AND		$80
+						JR		Z,cmp_loop
+			
+						; rom found, store the rom number
+			
+						POP AF			;  rom number
+						LD 		(FindM4ROM + 1), A ; patch frist LD i FindM4ROM
 						RET
 
 
-XMessage				CALL CheckM4Corruption
-						LD 		L, D   ; First parameter (LSB) to L
+XMessage				LD 		L, D   ; First parameter (LSB) to L
 						POP 	IX
 						POP 	BC
 						INC 	BC
@@ -454,12 +464,22 @@ XMessage				CALL CheckM4Corruption
 						LD 		A, (XpartPart)
 						ADD     B
 
+					
 						LD 		B, A				;Check if file loaded is the same than last time, to avoid loading again						
 						LD 		A, (LastXmessFile)
 						CP 		B
-						JR 		Z, AlreadyInRAM
-
-						LD 		A, B				; Otherwise save current file to be read as last read file
+						JR NZ,  NotInRAMSoLoad		; If not the same, load it from disk
+						
+						;In  case it is in RAM, we are not going to use it if we are using M4 interface
+						; because M4 interface sometimes corrupts the buffer
+						PUSH BC
+						CALL FindM4ROM
+						POP BC
+						CP $FF ;  NO M4
+						JR Z, AlreadyInRAM
+						
+						
+NotInRAMSoLoad			LD 		A, B				; Otherwise update the lastXMessFile as we are going to load it from disk now
 						LD		(LastXmessFile),A
 						
 						
@@ -483,7 +503,6 @@ XMessage				CALL CheckM4Corruption
 
 ; ---- read the file
 						CALL 	CAS_IN_CHAR  ; Although this is supposed to read only one char, in fact it reads one char in A, and a whole 2K at the BUFFER2K_ADDR
-
 
 AlreadyInRAM			LD 		DE, (AuxVar) ; Restore Global Offset
 						LD 		A, D
@@ -667,6 +686,7 @@ PaletteBuffer 			DS 16
 LastPaletteBuffer 		DB 0,26,24,11  ; Last PaletteBuffer is 16 bytes long, but we want the first 4 bytes to be a paletta with some contrast, in case the firs picture loading fails. Thus, instead of DS 16, we have 4xDB and DS 12
 						DS 12
 LastXmessFile			DB 255
+Checksum				DB 0
 Time					DB 0			; Used by the MODE0/1 interrupt core
 M4_ROM_NAME				DB "M4 BOAR",0xC4   ; C4 = 'D' ASCII code with the 7th bit set
 EndOfMainCode
